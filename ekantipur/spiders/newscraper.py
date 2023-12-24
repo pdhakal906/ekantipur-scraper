@@ -1,22 +1,34 @@
 import scrapy
 import json
 import re
+from datetime import datetime, timedelta
+from config import categories, start_date_str, end_date_str
 
 
 class NewscraperSpider(scrapy.Spider):
     name = "newscraper"
     allowed_domains = ["ekantipur.com"]
-    # not needed in this case
-    # start_urls = ["https://ekantipur.com/photo_feature/2023/12/13?json=true"]
 
-    # news categories
-    categories = ["business", "news", "opinion",
-                  "sports", "national", "entertainment", "feature", "world", "blog", "koseli", "diaspora", "Education", "photo_feature"]
+    # convert date string into date objects
+    start_date = datetime.strptime(start_date_str, "%Y/%m/%d")
+    end_date = datetime.strptime(end_date_str, "%Y/%m/%d")
+    current_date = start_date
 
-    # send muliple request for multiple categories
+    # read the data file
+    try:
+        with open('kantipur_news.json', 'r', encoding='utf-8') as file:
+            data_list = json.load(file)
+    except (json.JSONDecodeError, FileNotFoundError):
+        data_list = []
+
+    # start request by looping through each date and each category, pass date as meta to access it later
+
     def start_requests(self):
-        for indv_category in self.categories:
-            yield scrapy.Request(f"https://ekantipur.com/{indv_category}/2023/12/15?json=true", callback=self.parse)
+        while self.current_date <= self.end_date:
+            for indv_category in categories:
+                yield scrapy.Request("https://ekantipur.com/{}/{}?json=true".format(indv_category, self.current_date.strftime("%Y/%m/%d")), callback=self.parse, meta={'news_date': self.current_date.strftime("%Y/%m/%d"), 'news_category': indv_category})
+
+            self.current_date += timedelta(days=1)
 
     # helper function: extracts date using regex
     def extract_date(self, text):
@@ -43,12 +55,18 @@ class NewscraperSpider(scrapy.Spider):
         # pattern for href
         href_pattern = re.compile(r'<h2><a href="(.*?)">')
 
+        news_date = response.meta['news_date']
+        news_category = response.meta['news_category']
         # find above pattern from response's json data
         href_matches = href_pattern.findall(data['html'])
 
         # send request to matched links, pass link as meta to access it inside parse_news function
         for indv_href_match in href_matches:
-            yield response.follow(indv_href_match, callback=self.parse_news, meta={'link': indv_href_match})
+            # check for duplicates
+            found = any(item['link'] ==
+                        indv_href_match for item in self.data_list)
+            if not found:
+                yield response.follow(indv_href_match, callback=self.parse_news, meta={'link': indv_href_match, 'news_date': news_date, 'news_category': news_category})
 
     def parse_news(self, response):
         # separate parsing for photo_feature category
@@ -60,7 +78,8 @@ class NewscraperSpider(scrapy.Spider):
 
             # access the link variable passed via meta from parse function above
             link = response.meta['link']
-
+            news_date = response.meta['news_date']
+            news_category = response.meta['news_category']
             # parse the page to extract relevant data
             title = response.css('div.article-header h1::text').get()
             summary = response.css('div.description p::text').extract_first()
@@ -78,16 +97,22 @@ class NewscraperSpider(scrapy.Spider):
             for indv_i in image:
                 images.append(indv_i.get())
 
-            yield {
+            scraped_data = {
+                'news_date': news_date,
+                'published_date': self.extract_date(published_date),
+                'news_category': news_category.capitalize(),
                 'link': link,
                 'title': title,
                 'summary': summary,
                 'paragraphs': paragraphs,
                 'images': images,
                 'author': self.extract_author(author),
-                'author_link': author_link,
-                'published_date': self.extract_date(published_date),
+                'author_link': author_link
+
             }
+            self.data_list.append(scraped_data)
+
+            yield scraped_data
 
         # parsing for rest of the category
         else:
@@ -95,8 +120,10 @@ class NewscraperSpider(scrapy.Spider):
             paragraphs = []
             images = []
 
-            # access the link variable passed via meta from parse function above
+            # access the link variable and news_date passed via meta from parse function above
             link = response.meta['link']
+            news_date = response.meta['news_date']
+            news_category = response.meta['news_category']
 
             # parse the page to extract relevant data
             title = response.css('div.article-header h1::text').get()
@@ -124,13 +151,24 @@ class NewscraperSpider(scrapy.Spider):
                 for indv_i in rest_image:
                     images.append(indv_i.get())
 
-            yield {
+            scraped_data = {
+                'news_date': news_date,
+                'published_date': self.extract_date(published_date),
+                'news_category': news_category.capitalize(),
                 'link': link,
                 'title': title,
                 'summary': summary,
                 'paragraphs': paragraphs,
                 'image': images,
                 'author': self.extract_author(author),
-                'author_link': author_link,
-                "published_date": self.extract_date(published_date)
+                'author_link': author_link
+
             }
+            self.data_list.append(scraped_data)
+
+            yield scraped_data
+
+    # write data
+    def closed(self, reason):
+        with open('kantipur_news.json', 'w', encoding='utf-8') as json_file:
+            json.dump(self.data_list, json_file, ensure_ascii=False, indent=4)
